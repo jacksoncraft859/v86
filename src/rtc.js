@@ -134,8 +134,6 @@ RTC.prototype.timer = function(time, legacy_mode)
 
         this.next_interrupt += this.periodic_interrupt_time *
                 Math.ceil((time - this.next_interrupt) / this.periodic_interrupt_time);
-
-        return Math.max(0, time - this.next_interrupt);
     }
     else if(this.next_interrupt_alarm && this.next_interrupt_alarm < time)
     {
@@ -145,7 +143,18 @@ RTC.prototype.timer = function(time, legacy_mode)
         this.next_interrupt_alarm = 0;
     }
 
-    return 100;
+    let t = 100;
+
+    if(this.periodic_interrupt && this.next_interrupt)
+    {
+        t = Math.min(t, Math.max(0, this.next_interrupt - time));
+    }
+    if(this.next_interrupt_alarm)
+    {
+        t = Math.min(t, Math.max(0, this.next_interrupt_alarm - time));
+    }
+
+    return t;
 };
 
 RTC.prototype.bcd_pack = function(n)
@@ -233,6 +242,13 @@ RTC.prototype.cmos_port_read = function()
             return this.encode_time(new Date(this.rtc_time).getUTCFullYear() % 100);
 
         case CMOS_STATUS_A:
+            if(v86.microtick() % 1000 >= 999)
+            {
+                // Set update-in-progress for one millisecond every second (we
+                // may not have precision higher than that in browser
+                // environments)
+                return this.cmos_a | 0x80;
+            }
             return this.cmos_a;
         case CMOS_STATUS_B:
             //dbg_log("cmos read from index " + h(index));
@@ -255,7 +271,7 @@ RTC.prototype.cmos_port_read = function()
             return c;
 
         case CMOS_STATUS_D:
-            return 0xFF;
+            return 0;
 
         case CMOS_CENTURY:
             return this.encode_time(new Date(this.rtc_time).getUTCFullYear() / 100 | 0);

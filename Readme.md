@@ -1,4 +1,4 @@
-[![Join the chat at https://gitter.im/copy/v86](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/copy/v86)
+[![Join the chat at https://gitter.im/copy/v86](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/copy/v86) or #v86 on [irc.libera.chat](https://libera.chat/)
 
 v86 emulates an x86-compatible CPU and hardware. Machine code is translated to
 WebAssembly modules at runtime in order to achieve decent performance. Here's a
@@ -11,7 +11,6 @@ list of emulated hardware:
   - Single stepping (trap flag, debug registers)
   - Some exceptions, especially floating point and SSE
   - Multicore
-  - PAE
   - 64-bit extensions
 - A floating point unit (FPU). Calculations are done using the Berkeley
   SoftFloat library and therefore should be precise (but slow). Trigonometric
@@ -50,25 +49,37 @@ list of emulated hardware:
 [KolibriOS](https://copy.sh/v86/?profile=kolibrios) —
 [QNX](https://copy.sh/v86/?profile=qnx)
 
+## Docs
+
+[How it works](docs/how-it-works.md) —
+[Networking](docs/networking.md) —
+[Archlinux guest setup](docs/archlinux.md) —
+[Windows 2000/XP guest setup](docs/windows-xp.md) —
+[9p filesystem](docs/filesystem.md) —
+[Linux rootfs on 9p](docs/linux-9p-image.md) —
+[Profiling](docs/profiling.md)
+
 ## Compatibility
 
 Here's an overview of the operating systems supported in v86:
 
-- Linux works pretty well. Neither 64-bit nor PAE kernels are supported.
+- Linux works pretty well. 64-bit kernels are not supported.
   - Damn Small Linux (2.4 Kernel) works.
   - All tested versions of TinyCore work.
-  - [BuildRoot](https://buildroot.uclibc.org) can be used to build a minimal
-    image. [humphd/browser-vm](https://github.com/humphd/browser-vm) has some
-    useful scripts for building one.
+  - [Buildroot](https://buildroot.uclibc.org) can be used to build a minimal image.
+    [humphd/browser-vm](https://github.com/humphd/browser-vm) and
+    [darin755/browser-buildroot](https://github.com/Darin755/browser-buildroot) have some useful scripts for building one.
+  - [SkiffOS](https://github.com/skiffos/SkiffOS/tree/master/configs/browser/v86) (based on Buildroot) can cross-compile a custom image.
   - Archlinux works. See [archlinux.md](docs/archlinux.md) for building an image.
   - Debian works. An image can be built from a Dockerfile, see [tools/docker/debian/](tools/docker/debian/).
+  - Ubuntu up to 16.04 works.
   - Alpine Linux works.
 - ReactOS works.
 - FreeDOS, Windows 1.01 and MS-DOS run very well.
 - KolibriOS works.
 - Haiku works.
 - Android x86 1.6-r2 works if one selects VESA mode at the boot prompt. Newer
-  versions haven't been tested.
+  versions may work if compiled without SSE3. See [#224](https://github.com/copy/v86/issues/224).
 - Windows 1, 3.0, 95, 98, ME and 2000 work. Other versions currently don't (see [#86](https://github.com/copy/v86/issues/86), [#208](https://github.com/copy/v86/issues/208)).
   - In Windows 2000 and higher the PC type has to be changed from ACPI PC to Standard PC
 - Many hobby operating systems work.
@@ -80,7 +91,7 @@ Here's an overview of the operating systems supported in v86:
 - OpenBSD works with a specific boot configuration. At the `boot>` prompt type
   `boot -c`, then at the `UKC>` prompt `disable mpbios` and `exit`.
 - NetBSD works only with a custom kernel, see [#350](https://github.com/copy/v86/issues/350).
-- SerenityOS doesn't work due to missing PAE support.
+- SerenityOS works.
 
 You can get some infos on the disk images here: https://github.com/copy/images.
 
@@ -95,7 +106,9 @@ You need:
 - nodejs (a recent version is required, v16.11.1 is known to be working)
 - To run tests: nasm, gdb, qemu-system, gcc, libc-i386 and rustfmt
 
-See [tools/docker/test-image/dockerfile](tools/docker/test-image/dockerfile) for a full setup on Debian.
+See [tools/docker/test-image/Dockerfile](tools/docker/test-image/Dockerfile)
+for a full setup on Debian or
+[WSL](https://docs.microsoft.com/en-us/windows/wsl/install).
 
 - Run `make` to build the debug build (at `debug.html`).
 - Run `make all` to build the optimized build (at `index.html`).

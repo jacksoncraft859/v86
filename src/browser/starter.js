@@ -142,7 +142,7 @@ function V86Starter(options)
             console.error(str);
         },
         "dbg_trace_from_wasm": function() {
-            dbg_trace();
+            dbg_trace(LOG_CPU);
         },
 
         "codegen_finalize": (wasm_table_index, start, state_flags, ptr, len) => {
@@ -154,72 +154,84 @@ function V86Starter(options)
         "__indirect_function_table": wasm_table,
     };
 
-    let v86_bin = DEBUG ? "v86-debug.wasm" : "v86.wasm";
-    let v86_bin_fallback = "v86-fallback.wasm";
+    let wasm_fn = options["wasm_fn"];
 
-    if(options["wasm_path"])
+    if(!wasm_fn)
     {
-        v86_bin = options["wasm_path"];
-    }
-    else if(typeof window === "undefined" && typeof __dirname === "string")
-    {
-        v86_bin = __dirname + "/" + v86_bin;
-        v86_bin_fallback = __dirname + "/" + v86_bin_fallback;
-    }
-    else
-    {
-        v86_bin = "build/" + v86_bin;
-        v86_bin_fallback = "build/" + v86_bin_fallback;
-    }
-
-    v86util.load_file(v86_bin, {
-        done: bytes =>
+        wasm_fn = env =>
         {
-            WebAssembly
-                .instantiate(bytes, { "env": wasm_shared_funcs })
-                .then(({ instance }) => {
-                    const imports = wasm_shared_funcs;
-                    const exports = instance["exports"];
-                    wasm_memory = exports.memory;
-                    exports["rust_init"]();
+            return new Promise(resolve => {
+                let v86_bin = DEBUG ? "v86-debug.wasm" : "v86.wasm";
+                let v86_bin_fallback = "v86-fallback.wasm";
 
-                    const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
-                    cpu = emulator.cpu;
+                if(options["wasm_path"])
+                {
+                    v86_bin = options["wasm_path"];
+                    const slash = v86_bin.lastIndexOf("/");
+                    const dir = slash === -1 ? "" : v86_bin.substr(0, slash);
+                    v86_bin_fallback = dir + "/" + v86_bin_fallback;
+                }
+                else if(typeof window === "undefined" && typeof __dirname === "string")
+                {
+                    v86_bin = __dirname + "/" + v86_bin;
+                    v86_bin_fallback = __dirname + "/" + v86_bin_fallback;
+                }
+                else
+                {
+                    v86_bin = "build/" + v86_bin;
+                    v86_bin_fallback = "build/" + v86_bin_fallback;
+                }
 
-                    this.continue_init(emulator, options);
-                }, err => {
-                    v86util.load_file(v86_bin_fallback, {
-                        done: bytes => {
-                            WebAssembly
-                                .instantiate(bytes, { "env": wasm_shared_funcs })
-                                .then(({ instance }) => {
-                                    const imports = wasm_shared_funcs;
-                                    const exports = instance["exports"];
-                                    wasm_memory = exports.memory;
-                                    exports["rust_init"]();
-
-                                    const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
-                                    cpu = emulator.cpu;
-
-                                    this.continue_init(emulator, options);
+                v86util.load_file(v86_bin, {
+                    done: async bytes =>
+                    {
+                        try
+                        {
+                            const { instance } = await WebAssembly.instantiate(bytes, env);
+                            this.wasm_source = bytes;
+                            resolve(instance.exports);
+                        }
+                        catch(err)
+                        {
+                            v86util.load_file(v86_bin_fallback, {
+                                    done: async bytes => {
+                                        const { instance } = await WebAssembly.instantiate(bytes, env);
+                                        this.wasm_source = bytes;
+                                        resolve(instance.exports);
+                                    },
                                 });
-                        },
-                    });
-                });
-        },
-        progress: e =>
-        {
-            this.emulator_bus.send("download-progress", {
-                file_index: 0,
-                file_count: 1,
-                file_name: v86_bin,
+                        }
+                    },
+                    progress: e =>
+                    {
+                        this.emulator_bus.send("download-progress", {
+                            file_index: 0,
+                            file_count: 1,
+                            file_name: v86_bin,
 
-                lengthComputable: e.lengthComputable,
-                total: e.total,
-                loaded: e.loaded,
+                            lengthComputable: e.lengthComputable,
+                            total: e.total,
+                            loaded: e.loaded,
+                        });
+                    }
+                });
             });
-        }
-    });
+        };
+    }
+
+    wasm_fn({ "env": wasm_shared_funcs })
+        .then((exports) => {
+            wasm_memory = exports.memory;
+            exports["rust_init"]();
+
+            const emulator = this.v86 = new v86(this.emulator_bus, { exports, wasm_table });
+            cpu = emulator.cpu;
+
+            this.continue_init(emulator, options);
+        });
+
+    this.zstd_worker = null;
+    this.zstd_worker_request_id = 0;
 }
 
 V86Starter.prototype.continue_init = async function(emulator, options)
@@ -258,6 +270,8 @@ V86Starter.prototype.continue_init = async function(emulator, options)
     settings.uart3 = options["uart3"];
     settings.cmdline = options["cmdline"];
     settings.preserve_mac_from_state_image = options["preserve_mac_from_state_image"];
+    settings.mac_address_translation = options["mac_address_translation"];
+    settings.cpuid_level = options["cpuid_level"];
 
     if(options["network_adapter"])
     {
@@ -356,14 +370,14 @@ V86Starter.prototype.continue_init = async function(emulator, options)
 
     var files_to_load = [];
 
-    function add_file(name, file)
+    const add_file = (name, file) =>
     {
         if(!file)
         {
             return;
         }
 
-        if(file["get"] && file["set"] && file["load"])
+        if(file.get && file.set && file.load)
         {
             files_to_load.push({
                 name: name,
@@ -371,17 +385,6 @@ V86Starter.prototype.continue_init = async function(emulator, options)
             });
             return;
         }
-
-        // Anything coming from the outside world needs to be quoted for
-        // Closure Compiler compilation
-        file = {
-            buffer: file["buffer"],
-            async: file["async"],
-            url: file["url"],
-            size: file["size"],
-            fixed_chunk_size: file["fixed_chunk_size"],
-            use_parts: file.use_parts,
-        };
 
         if(name === "bios" || name === "vga_bios" ||
             name === "initial_state" || name === "multiboot" ||
@@ -394,7 +397,7 @@ V86Starter.prototype.continue_init = async function(emulator, options)
 
         if(file.buffer instanceof ArrayBuffer)
         {
-            var buffer = new SyncBuffer(file.buffer);
+            var buffer = new v86util.SyncBuffer(file.buffer);
             files_to_load.push({
                 name: name,
                 loadable: buffer,
@@ -439,11 +442,11 @@ V86Starter.prototype.continue_init = async function(emulator, options)
 
                 if(file.use_parts)
                 {
-                    buffer = new v86util.AsyncXHRPartfileBuffer(file.url, file.size, file.fixed_chunk_size);
+                    buffer = new v86util.AsyncXHRPartfileBuffer(file.url, file.size, file.fixed_chunk_size, false, this.zstd_decompress_worker.bind(this));
                 }
                 else
                 {
-                    buffer = new v86util.AsyncXHRBuffer(file.url, file.size);
+                    buffer = new v86util.AsyncXHRBuffer(file.url, file.size, file.fixed_chunk_size);
                 }
 
                 files_to_load.push({
@@ -464,7 +467,7 @@ V86Starter.prototype.continue_init = async function(emulator, options)
         {
             dbg_log("Ignored file: url=" + file.url + " buffer=" + file.buffer);
         }
-    }
+    };
 
     if(options["state"])
     {
@@ -485,8 +488,8 @@ V86Starter.prototype.continue_init = async function(emulator, options)
 
     if(options["filesystem"])
     {
-        var fs_url = options["filesystem"]["basefs"];
-        var base_url = options["filesystem"]["baseurl"];
+        var fs_url = options["filesystem"].basefs;
+        var base_url = options["filesystem"].baseurl;
 
         let file_storage = new MemoryFileStorage();
 
@@ -498,14 +501,14 @@ V86Starter.prototype.continue_init = async function(emulator, options)
 
         if(fs_url)
         {
-            console.assert(base_url, "Filesystem: baseurl must be specified");
+            dbg_assert(base_url, "Filesystem: baseurl must be specified");
 
             var size;
 
             if(typeof fs_url === "object")
             {
-                size = fs_url["size"];
-                fs_url = fs_url["url"];
+                size = fs_url.size;
+                fs_url = fs_url.url;
             }
             dbg_assert(typeof fs_url === "string");
 
@@ -545,7 +548,13 @@ V86Starter.prototype.continue_init = async function(emulator, options)
             v86util.load_file(f.url, {
                 done: function(result)
                 {
-                    put_on_settings.call(this, f.name, f.as_json ? result : new SyncBuffer(result));
+                    if(f.url.endsWith(".zst") && f.name !== "initial_state")
+                    {
+                        dbg_assert(f.size, "A size must be provided for compressed images");
+                        result = this.zstd_decompress(f.size, new Uint8Array(result));
+                    }
+
+                    put_on_settings.call(this, f.name, f.as_json ? result : new v86util.SyncBuffer(result));
                     cont(index + 1);
                 }.bind(this),
                 progress: function progress(e)
@@ -578,7 +587,7 @@ V86Starter.prototype.continue_init = async function(emulator, options)
     }.bind(this);
     cont(0);
 
-    function done()
+    async function done()
     {
         //if(settings.initial_state)
         //{
@@ -599,18 +608,17 @@ V86Starter.prototype.continue_init = async function(emulator, options)
 
             if(options["bzimage_initrd_from_filesystem"])
             {
-                const { bzimage, initrd } = this.get_bzimage_initrd_from_filesystem(settings.fs9p);
+                const { bzimage_path, initrd_path } = this.get_bzimage_initrd_from_filesystem(settings.fs9p);
 
-                dbg_log("Found bzimage: " + bzimage + " and initrd: " + initrd);
+                dbg_log("Found bzimage: " + bzimage_path + " and initrd: " + initrd_path);
 
-                Promise.all([
-                    settings.fs9p.read_file(initrd),
-                    settings.fs9p.read_file(bzimage),
-                ]).then(([initrd, bzimage]) => {
-                    put_on_settings.call(this, "initrd", new SyncBuffer(initrd.buffer));
-                    put_on_settings.call(this, "bzimage", new SyncBuffer(bzimage.buffer));
-                    finish.call(this);
-                });
+                const [initrd, bzimage] = await Promise.all([
+                    settings.fs9p.read_file(initrd_path),
+                    settings.fs9p.read_file(bzimage_path),
+                ]);
+                put_on_settings.call(this, "initrd", new v86util.SyncBuffer(initrd.buffer));
+                put_on_settings.call(this, "bzimage", new v86util.SyncBuffer(bzimage.buffer));
+                finish.call(this);
             }
             else
             {
@@ -619,7 +627,7 @@ V86Starter.prototype.continue_init = async function(emulator, options)
         }
         else
         {
-            console.assert(
+            dbg_assert(
                 !options["bzimage_initrd_from_filesystem"],
                 "bzimage_initrd_from_filesystem: Requires a filesystem");
             finish.call(this);
@@ -651,13 +659,114 @@ V86Starter.prototype.continue_init = async function(emulator, options)
     }
 };
 
+/**
+ * @param {number} decompressed_size
+ * @param {Uint8Array} src
+ * @return {ArrayBuffer}
+ */
+V86Starter.prototype.zstd_decompress = function(decompressed_size, src)
+{
+    const cpu = this.v86.cpu;
+
+    dbg_assert(!this.zstd_context);
+    this.zstd_context = cpu.zstd_create_ctx(src.length);
+
+    new Uint8Array(cpu.wasm_memory.buffer).set(src, cpu.zstd_get_src_ptr(this.zstd_context));
+
+    const ptr = cpu.zstd_read(this.zstd_context, decompressed_size);
+    const result = cpu.wasm_memory.buffer.slice(ptr, ptr + decompressed_size);
+    cpu.zstd_read_free(ptr, decompressed_size);
+
+    cpu.zstd_free_ctx(this.zstd_context);
+    this.zstd_context = null;
+
+    return result;
+};
+
+/**
+ * @param {number} decompressed_size
+ * @param {Uint8Array} src
+ * @return {Promise<ArrayBuffer>}
+ */
+V86Starter.prototype.zstd_decompress_worker = async function(decompressed_size, src)
+{
+    if(!this.zstd_worker)
+    {
+        function the_worker()
+        {
+            let wasm;
+
+            globalThis.onmessage = function(e)
+            {
+                if(!wasm)
+                {
+                    const env = Object.fromEntries([
+                        "cpu_exception_hook", "hlt_op",
+                        "microtick", "get_rand_int", "pic_acknowledge",
+                        "io_port_read8", "io_port_read16", "io_port_read32",
+                        "io_port_write8", "io_port_write16", "io_port_write32",
+                        "mmap_read8", "mmap_read16", "mmap_read32",
+                        "mmap_write8", "mmap_write16", "mmap_write32", "mmap_write64", "mmap_write128",
+                        "codegen_finalize",
+                        "jit_clear_func", "jit_clear_all_funcs",
+                    ].map(f => [f, () => console.error("zstd worker unexpectedly called " + f)]));
+
+                    env["__indirect_function_table"] = new WebAssembly.Table({ element: "anyfunc", "initial": 1024 });
+                    env["abort"] = () => { throw new Error("zstd worker aborted"); };
+                    env["log_from_wasm"] = env["console_log_from_wasm"] = (off, len) => {
+                        console.log(String.fromCharCode(...new Uint8Array(wasm.exports.memory.buffer, off, len)));
+                    };
+                    env["dbg_trace_from_wasm"] = () => console.trace();
+
+                    wasm = new WebAssembly.Instance(new WebAssembly.Module(e.data), { "env": env });
+                    return;
+                }
+
+                const { src, decompressed_size, id } = e.data;
+                const exports = wasm.exports;
+
+                const zstd_context = exports["zstd_create_ctx"](src.length);
+                new Uint8Array(exports.memory.buffer).set(src, exports["zstd_get_src_ptr"](zstd_context));
+
+                const ptr = exports["zstd_read"](zstd_context, decompressed_size);
+                const result = exports.memory.buffer.slice(ptr, ptr + decompressed_size);
+                exports["zstd_read_free"](ptr, decompressed_size);
+
+                exports["zstd_free_ctx"](zstd_context);
+
+                postMessage({ result, id }, [result]);
+            };
+        }
+
+        const url = URL.createObjectURL(new Blob(["(" + the_worker.toString() + ")()"], { type: "text/javascript" }));
+        this.zstd_worker = new Worker(url);
+        URL.revokeObjectURL(url);
+        this.zstd_worker.postMessage(this.wasm_source, [this.wasm_source]);
+    }
+
+    return new Promise(resolve => {
+        const id = this.zstd_worker_request_id++;
+        const done = async e =>
+        {
+            if(e.data.id === id)
+            {
+                this.zstd_worker.removeEventListener("message", done);
+                dbg_assert(decompressed_size === e.data.result.byteLength);
+                resolve(e.data.result);
+            }
+        };
+        this.zstd_worker.addEventListener("message", done);
+        this.zstd_worker.postMessage({ src, decompressed_size, id }, [src.buffer]);
+    });
+};
+
 V86Starter.prototype.get_bzimage_initrd_from_filesystem = function(filesystem)
 {
     const root = (filesystem.read_dir("/") || []).map(x => "/" + x);
     const boot = (filesystem.read_dir("/boot/") || []).map(x => "/boot/" + x);
 
-    let initrd;
-    let bzimage;
+    let initrd_path;
+    let bzimage_path;
 
     for(let f of [].concat(root, boot))
     {
@@ -665,25 +774,25 @@ V86Starter.prototype.get_bzimage_initrd_from_filesystem = function(filesystem)
         const is_bzimage = /vmlinuz/i.test(f) || /bzimage/i.test(f);
         const is_initrd = /initrd/i.test(f) || /initramfs/i.test(f);
 
-        if(is_bzimage && (!bzimage || !old))
+        if(is_bzimage && (!bzimage_path || !old))
         {
-            bzimage = f;
+            bzimage_path = f;
         }
 
-        if(is_initrd && (!initrd || !old))
+        if(is_initrd && (!initrd_path || !old))
         {
-            initrd = f;
+            initrd_path = f;
         }
     }
 
-    if(!initrd || !bzimage)
+    if(!initrd_path || !bzimage_path)
     {
         console.log("Failed to find bzimage or initrd in filesystem. Files:");
         console.log(root.join(" "));
         console.log(boot.join(" "));
     }
 
-    return { initrd, bzimage };
+    return { initrd_path, bzimage_path };
 };
 
 /**
@@ -691,7 +800,7 @@ V86Starter.prototype.get_bzimage_initrd_from_filesystem = function(filesystem)
  * asynchronous.
  * @export
  */
-V86Starter.prototype.run = function()
+V86Starter.prototype.run = async function()
 {
     this.bus.send("cpu-run");
 };
@@ -700,18 +809,30 @@ V86Starter.prototype.run = function()
  * Stop emulation. Do nothing if emulator is not running. Can be asynchronous.
  * @export
  */
-V86Starter.prototype.stop = function()
+V86Starter.prototype.stop = async function()
 {
-    this.bus.send("cpu-stop");
+    if(!this.cpu_is_running)
+    {
+        return;
+    }
+
+    await new Promise(resolve => {
+        const listener = () => {
+            this.remove_listener("emulator-stopped", listener);
+            resolve();
+        };
+        this.add_listener("emulator-stopped", listener);
+        this.bus.send("cpu-stop");
+    });
 };
 
 /**
  * @ignore
  * @export
  */
-V86Starter.prototype.destroy = function()
+V86Starter.prototype.destroy = async function()
 {
-    this.stop();
+    await this.stop();
 
     this.v86.destroy();
     this.keyboard_adapter && this.keyboard_adapter.destroy();
@@ -719,6 +840,7 @@ V86Starter.prototype.destroy = function()
     this.mouse_adapter && this.mouse_adapter.destroy();
     this.screen_adapter && this.screen_adapter.destroy();
     this.serial_adapter && this.serial_adapter.destroy();
+    this.speaker_adapter && this.speaker_adapter.destroy();
 };
 
 /**
@@ -772,34 +894,22 @@ V86Starter.prototype.remove_listener = function(event, listener)
  * @param {ArrayBuffer} state
  * @export
  */
-V86Starter.prototype.restore_state = function(state)
+V86Starter.prototype.restore_state = async function(state)
 {
+    dbg_assert(arguments.length === 1);
     this.v86.restore_state(state);
 };
 
 /**
- * Asynchronously save the current state of the emulator. The first argument to
- * the callback is an Error object if something went wrong and is null
- * otherwise.
+ * Asynchronously save the current state of the emulator.
  *
- * @param {function(Object, ArrayBuffer)} callback
+ * @return {Promise<ArrayBuffer>}
  * @export
  */
-V86Starter.prototype.save_state = function(callback)
+V86Starter.prototype.save_state = async function()
 {
-    // Might become asynchronous at some point
-
-    setTimeout(function()
-    {
-        try
-        {
-            callback(null, this.v86.save_state());
-        }
-        catch(e)
-        {
-            callback(e, null);
-        }
-    }.bind(this), 0);
+    dbg_assert(arguments.length === 0);
+    return this.v86.save_state();
 };
 
 /**
@@ -1022,7 +1132,10 @@ V86Starter.prototype.screen_go_fullscreen = function()
         focus_element && focus_element.focus();
     }
 
-    //this.lock_mouse(elem);
+    try {
+        navigator.keyboard.lock();
+    } catch(e) {}
+
     this.lock_mouse();
 };
 
@@ -1158,18 +1271,15 @@ V86Starter.prototype.mount_fs = async function(path, baseurl, basefs, callback)
 
 /**
  * Write to a file in the 9p filesystem. Nothing happens if no filesystem has
- * been initialized. First argument to the callback is an error object if
- * something went wrong and null otherwise.
+ * been initialized.
  *
  * @param {string} file
  * @param {Uint8Array} data
- * @param {function(Object)=} callback
  * @export
  */
-V86Starter.prototype.create_file = function(file, data, callback)
+V86Starter.prototype.create_file = async function(file, data)
 {
-    callback = callback || function() {};
-
+    dbg_assert(arguments.length === 2);
     var fs = this.fs9p;
 
     if(!fs)
@@ -1186,15 +1296,11 @@ V86Starter.prototype.create_file = function(file, data, callback)
 
     if(!not_found)
     {
-        fs.CreateBinaryFile(filename, parent_id, data)
-            .then(() => callback(null));
+        await fs.CreateBinaryFile(filename, parent_id, data);
     }
     else
     {
-        setTimeout(function()
-        {
-            callback(new FileNotFoundError());
-        }, 0);
+        return Promise.reject(new FileNotFoundError());
     }
 };
 
@@ -1203,11 +1309,11 @@ V86Starter.prototype.create_file = function(file, data, callback)
  * initialized.
  *
  * @param {string} file
- * @param {function(Object, Uint8Array)} callback
  * @export
  */
-V86Starter.prototype.read_file = function(file, callback)
+V86Starter.prototype.read_file = async function(file)
 {
+    dbg_assert(arguments.length === 1);
     var fs = this.fs9p;
 
     if(!fs)
@@ -1215,16 +1321,16 @@ V86Starter.prototype.read_file = function(file, callback)
         return;
     }
 
-    fs.read_file(file).then((result) => {
-        if(result)
-        {
-            callback(null, result);
-        }
-        else
-        {
-            callback(new FileNotFoundError(), null);
-        }
-    });
+    const result = await fs.read_file(file);
+
+    if(result)
+    {
+        return result;
+    }
+    else
+    {
+        return Promise.reject(new FileNotFoundError());
+    }
 };
 
 V86Starter.prototype.automatically = function(steps)
@@ -1286,7 +1392,7 @@ V86Starter.prototype.automatically = function(steps)
             return;
         }
 
-        console.assert(false, step);
+        dbg_assert(false, step);
     };
 
     run(steps);
